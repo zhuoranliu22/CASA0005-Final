@@ -1,0 +1,424 @@
+---
+title: "Name: Zhuoran Liu"
+author: 
+- |
+    | Student number: 22072000
+date: "16/12/22"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+# Originality declaration
+
+I, [Zhuoran Liu], confirm that the work presented in this assessment is my own.
+Where information has been derived from other sources, I confirm that this has been indicated in the work.
+
+date: [16/12/22]
+
+# Initial project scope
+
+This project will identify the spatial patterns of New York SQF cases to inform potential spatial factors.
+My question is "are the stop, question and frisk cases with suspects in different races in 2021 for New York spatially different if they exhibit clustering and dose spatial autocorrelation exist?"
+
+1.  Data: In this research, I used the SQF cases in 2021 for New York and New York police districts.
+    I used the year 2021 in particular because it would be more representative to inform future work, since it is the latest data.
+    I noticed that in the data, the number of black suspects is much larger than that of other races, such as white or Asian, so I intend to find out if the spatial patterns between races exhibit similar patterns, to identify if racism is a potential factor.
+
+2.  Data loading: I will replace the NA values when I load the data in to R, and convert the location and SQF data into spatial objects with the same CRS.
+    Then I will do spatial subset to include only the points within the district boundaries.
+    After that, I will filter out the data I need by year and race.
+
+3.  Data analysis: I will use Ripley's k analysis to identify if clustering exists, and use DBScan to find the location of clusters (if there is any).
+    I will compare the clusters of black suspects and suspects in other races if the overall SQF exhibits clustering.
+    Then I want to conduct a spatial autocorrelation analysis to see if it exists.
+
+4.  The limitation of this research may be that I only used one year, which is relatively a short time period, and will potentially decrease the accuracy of the results.
+    Moreover, I could include more factors into the research and do a regression analysis .
+
+The following is my research process:
+
+First, I load all the packages needed into R:
+
+```{r loda_packages}
+library(tidyverse)
+library(sf)
+library(tmap)
+library(janitor)
+library(spatstat)
+library(readxl)
+library(sp)
+library(spdep)
+```
+
+# Data loading
+
+Read in the data and replace the NA values:
+
+```{r read_in_data}
+sqf <- read_excel("sqf-2021.xlsx", na = " ")
+police_districts <- st_read("Police\ Precincts/geo_export_90951f1f-3578-4fa7-be9a-a082ba32bc97.shp")
+```
+
+Note the CRS of police_districts is WGS84.
+
+Check the variable types to make sure the NA values are correctly replaced and did not cause numeric values to become character columns:
+
+```{r check_data_types}
+Datatypelist <- sqf %>% 
+  summarise_all(class) %>%
+  pivot_longer(everything(), 
+               names_to="All_variables", 
+               values_to="Variable_class")
+
+Datatypelist
+```
+
+# Data wrangling
+
+Convert sqf to an sf object.
+To avoid error, filter out the missing coordinates:
+
+```{r convert_into_sf}
+points <- sqf%>%
+  filter(STOP_LOCATION_X!=0 & STOP_LOCATION_Y!=0)%>%
+
+  st_as_sf(., coords = c("STOP_LOCATION_X", "STOP_LOCATION_Y"), 
+                   crs = 2908)
+```
+
+The number of observations are the same as the original dataset, showing there is no missing coordinates.
+
+Map the points to see if there are any clusters:
+
+```{r map_points}
+tmap_mode("plot")
+tm_shape(police_districts) +
+  tm_polygons(col = NA, alpha = 0.5) +
+tm_shape(points) +
+  tm_dots(col = "blue")
+```
+
+The plot can show some clusters.
+
+Transform the CRS of police_districts to check if the points are all within the boundaries through a spatial subset.
+
+```{r spatial_subset}
+police_districts <- police_districts%>%
+  st_transform(., 2908)
+point_sub <- points[police_districts,]
+```
+
+There are 7 points outside the boundaries.
+
+Filter out the sqf cases with black and other races:
+
+```{r filter_points}
+points_black<-point_sub%>%
+  clean_names()%>%
+  filter(suspect_race_description=="BLACK")
+points_other<-point_sub%>%
+  clean_names()%>%
+  filter(suspect_race_description!="BLACK")
+```
+
+The number of observations of points_black is larger than that of points_other, which is the total number of all other races combined, by approximately 1800.
+
+Plot the map with points_black and points_other:
+
+```{r map_filtered_points}
+tmap_mode("plot")
+tm_shape(police_districts) +
+  tm_polygons(col = NA, alpha = 0.5) +
+  tm_shape(points_black) +
+  tm_dots(col = "blue")+
+  tm_shape(points_other) +
+  tm_dots(col = "red")
+
+```
+
+From the plot, I can see that the clusters of points_black and points_other seem to overlap in the northwest part of New York, while in the middle part, points_black shows more clustered pattern.
+I can now assume that racism is potentially a factor of sqf in the middle part of New York.
+
+# Data analysis
+
+## Clustering
+
+point pattern analysis:
+
+```{r creat_objects}
+window <- as.owin(police_districts)
+plot(window)
+
+
+point_sub_sp<- point_sub %>%
+  as(., 'Spatial')
+points_black_sp<- points_black %>%
+  as(., 'Spatial')
+points_other_sp<- points_other %>%
+  as(., 'Spatial')
+
+point_sub_sp.ppp <- ppp(x=point_sub_sp@coords[,1],
+                          y=point_sub_sp@coords[,2],
+                          window=window)
+points_black_sp.ppp <- ppp(x=points_black_sp@coords[,1],
+                          y=points_black_sp@coords[,2],
+                          window=window)
+points_other_sp.ppp <- ppp(x=points_other_sp@coords[,1],
+                          y=points_other_sp@coords[,2],
+                          window=window)
+```
+
+Ripley's k
+
+I am using Ripley's K to test if there are any spatial clusters in the point data.
+
+```{r ripleys_k_all}
+K <- point_sub_sp.ppp %>%
+  Kest(., correction="border") %>%
+  plot()
+```
+
+It shows that the overall SQF shows clustering up to the distance of around 10500, so I will move on to see if there is any difference between the clusters of points_black and points_other:
+
+```{r ripleys_k_black}
+K <- points_black_sp.ppp %>%
+  Kest(., correction="border") %>%
+  plot()
+```
+
+The plot shows points_black are clustered with all distances.
+
+```{r ripleys_k_other}
+K <- points_other_sp.ppp %>%
+  Kest(., correction="border") %>%
+  plot()
+```
+
+The plot shows that points_other are clustered for distances up to around 11000.
+The fact that points_other are only clustered when distance is less than 11000 shows that race is indeed a potential factor causing this difference.
+
+The plots show clusters exist, but not the exact location, so i will do DBScan analysis.
+I chose the eps to be 5000 based on the Ripley's K plot and tried a few other values.
+5000 seem to produce a more reasonable result.
+I used distplot to show for each point the average distance to the k neighbors, which are then plotted in ascending order.
+
+```{r dbscan_black}
+library(sp)
+
+points_black_todf <- points_black_sp %>%
+  coordinates(.)%>%
+  as.data.frame()
+
+points_black_todf_DBSCAN <- points_black_todf %>%
+  fpc::dbscan(.,eps = 5000, MinPts = 50)
+
+points_black_todf%>%
+  dbscan::kNNdistplot(.,k=50)
+
+plot(points_black_todf_DBSCAN, points_black_todf, main = "DBSCAN Output for points_black", frame = F)
+plot(police_districts$geometry, add=T)
+```
+
+The first plot shows the knee is around 5500, and the second plot shows the location of clusters.
+
+The following is DBScan analysis for points_other.
+I chose the eps to be 4000, because in the Ripley's K, the largest bulge is at around 4000:
+
+```{r dbscan_other}
+points_other_todf <- points_other_sp %>%
+  coordinates(.)%>%
+  as.data.frame()
+
+points_other_todf_DBSCAN <- points_other_todf %>%
+  fpc::dbscan(.,eps = 4000, MinPts = 50)
+
+points_other_todf%>%
+  dbscan::kNNdistplot(.,k=50)
+
+plot(points_other_todf_DBSCAN, points_other_todf, main = "DBSCAN Output for points_other", frame = F)
+plot(police_districts$geometry, add=T)
+```
+
+The first plot shows the knee is around 3500, and the second plot shows the location of clusters.
+
+The DBScan output shows a significant difference in the location, number and sizes of the clusters of points_black and points_other.
+The sizes and number of the clusters of points_other are much smaller than those of points_black, which can be seen as a further proof to support my assumption from before-- racism may be a spatial factor of SQF.
+
+Now I add the cluster information to the original dataframes:
+
+```{r cluster_information_black}
+points_black_todf_DBSCAN
+points_black_todf<- points_black_todf%>%
+  mutate(dbcluster=points_black_todf_DBSCAN$cluster)
+```
+
+```{r cluster_information_other}
+points_other_todf_DBSCAN
+points_other_todf<- points_other_todf%>%
+  mutate(dbcluster=points_other_todf_DBSCAN$cluster)
+```
+
+Convert our original dataframes to sf objects again:
+
+```{r convert_into_sf}
+tosf_black <- points_black_todf%>%
+  st_as_sf(., coords = c("coords.x1", "coords.x2"), 
+                   crs = 2908)%>%
+  filter(dbcluster>0)
+tosf_other <- points_other_todf%>%
+  st_as_sf(., coords = c("coords.x1", "coords.x2"), 
+                   crs = 2908)%>%
+  filter(dbcluster>0)
+
+```
+
+Map the data :
+
+```{r cluser_map_black}
+ggplot(data = police_districts) +
+  geom_sf() +
+  geom_sf(data = tosf_black, size = 0.4, colour=tosf_black$dbcluster, fill=tosf_black$dbcluster)
+```
+
+```{r cluster_map_other}
+ggplot(data = police_districts) +
+  geom_sf() +
+  geom_sf(data = tosf_other, size = 0.4, colour=tosf_other$dbcluster, fill=tosf_other$dbcluster)
+```
+
+From the maps and analysis above, it can be concluded that SQF in 2021 for New York exhibit clustering, and the differences in sizes, location and numbers of clusters are significant between black suspects and suspects in other races, which leads to a further conclusion that racism might be a spatial factor for SQF.
+
+## Spatial autocorrelation:
+
+Now that I have identified the clustering patterns of SQF, I want to find out if there is any spatial autocorrelation between neighborhoods where SQF happens.
+
+Firstly, to create a continuous observation, I join the data to count the number of occurrences of SQF and compute its density in each district.
+
+```{r join_data}
+points_sf_joined <- police_districts%>%
+  mutate(n = lengths(st_intersects(., point_sub)))%>%
+  janitor::clean_names()%>%
+  mutate(area=st_area(.))%>%
+  mutate(density=n/area)
+
+  
+```
+
+Map the points
+
+```{r map_joined_data}
+points_sf_joined<- points_sf_joined %>%                    
+  group_by(geometry) %>%         
+  summarise(density = first(density),
+          sqfcount= first(n))
+
+tm_shape(points_sf_joined) +
+    tm_polygons("density",
+        style="jenks",
+        palette="PuOr",
+        midpoint=NA,
+        popup.vars=c("density"),
+        title="SQF Density")
+```
+
+I can observe clustering from the plot, and now I want to use Moran's I to check for autocorrelation.
+Firstly, calculate the centroids of New York police districts:
+
+```{r centroids}
+coordsW <- points_sf_joined%>%
+  st_centroid()%>%
+  st_geometry()
+  
+plot(coordsW,axes=TRUE)
+```
+
+Next, create a neighbors list.
+I choose to use the Queen case here:
+
+```{r neighbor_list_queen}
+NY_nb <- points_sf_joined %>%
+  poly2nb(., queen=T)
+```
+
+Here is the summary
+
+```{r summary_queen}
+summary(NY_nb)
+```
+
+From the result, it is shown that the average number of neighbors is 4.26.
+
+Now I plot the neighbors:
+
+```{r plot_neighbor}
+plot(NY_nb, st_geometry(coordsW), col="red")
+plot(points_sf_joined$geometry, add=T)
+```
+
+Create a spatial weight matrix:
+
+```{r spatial_weight_matrix}
+NY.lw <- NY_nb %>%
+  nb2mat(., style="B")
+
+sum(NY.lw)
+```
+
+It shows that there are 328 neighbors.
+
+Moran's I requires a spatial weight list object, so I convert the spatial weight matrix
+
+```{r spatial_weight_list}
+NY.lw <- NY_nb %>%
+  nb2listw(., style="C")
+```
+
+Compute Moran's I:
+
+```{r Morans_I}
+I_NY <- points_sf_joined %>%
+  pull(density) %>%
+  as.vector()%>%
+  moran.test(., NY.lw)
+
+I_NY
+
+```
+
+The Moran's I statistic is 0.2921, which is greater than 0 but not very close to 1, suggesting weak to moderate spatial autocorrelation in SQF.
+
+# Conclusion and reflection
+
+In this research, I have used Ripley's K, DBScan to identify the clusters' existence and locations.
+I firstly used Ripley's K to see if the overall SQF shows clustering.
+Then it does show clustering, so I continued to see if there is any difference between the clusters of SQF with black suspects and with suspects in other races by Ripley's K and DBScan.
+The result shows a significant difference in sizes, numbers, and location, which proves that racism is a potential spatial factor that affects the occurrence of SQF.
+Then I used Moran's I to test for spatial autocorrelation, and concluded that there is a weak to moderate autocorrelation in SQF.
+
+This research can help understand the occurrences of SQF.
+It can provide advice for the authority on how to reduce and make SQF more accurate by reducing racism.
+It would be safer for the city and more efficient for the police officers to identify criminals more accurately, by not jumping to conclusions based on only their skin color.
+
+However, there are some limitations of this research:
+
+1\.
+I only used one year, which will potentially decrease the accuracy of the results.
+A longer time period could give a more accurate and reliable result;
+
+2\.
+I could include more factors into the research and do a regression analysis to gain a more comprehensive understanding on what other factors could have had impact on SQF and its distribution, such as social factors like income and educational level.
+
+3\.
+Racism may not be the only factor that causes the difference in clusters.
+There is a possibility that more black people live in a certain area in the first place, so it would naturally cause a bigger cluster.
+To resolve this bias problem, a feasible solution might be to include the race information in all areas and compare it with the cluster results.
+
+4\.
+I only compared the difference visually based on the output of DBScan.
+Although the difference is quite apparent, a statistical comparison might be more convincing.
+
+5\.
+DBScan requires values of eps and minpts, while I could not assign values to them statistically.
+It be resolved by HDBScan analysis.
